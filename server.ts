@@ -30,7 +30,7 @@ const BG_COLORS = [
 ];
 
 interface ChatEntry {
-  timeStr: string;   // "MM/DD(曜) HH:MM"
+  timeStr: string;   // "MM/DD(曜) HH:MM"（JST）
   name: string;      // ユーザー or NPC名
   message: string;   // 発言内容
   goobi: string;     // 語尾
@@ -48,14 +48,59 @@ const LAST_USER_KEY = ["lastUserName"];
 const kv = await Deno.openKv();
 
 /************************************************
+ * 現在の日本時間（JST）の時刻文字列を生成
+ ************************************************/
+function timeStr(): string {
+  const t = new Date();
+  const options: Intl.DateTimeFormatOptions = {
+    timeZone: "Asia/Tokyo",
+    month: "2-digit",
+    day: "2-digit",
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  };
+  const dtf = new Intl.DateTimeFormat("ja-JP", options);
+  const parts = dtf.formatToParts(t);
+  let month = "", day = "", weekday = "", hour = "", minute = "";
+  for (const part of parts) {
+    if (part.type === "month") month = part.value;
+    if (part.type === "day") day = part.value;
+    if (part.type === "weekday") weekday = part.value; // 短縮形（例："火"）
+    if (part.type === "hour") hour = part.value;
+    if (part.type === "minute") minute = part.value;
+  }
+  return `${month}/${day}(${weekday}) ${hour}:${minute}`;
+}
+
+/************************************************
+ * JSTの現在時刻（数値の時刻のみ）を取得
+ ************************************************/
+function getJSTHour(): number {
+  const t = new Date();
+  const options: Intl.DateTimeFormatOptions = {
+    timeZone: "Asia/Tokyo",
+    hour: "2-digit",
+    hour12: false,
+  };
+  const dtf = new Intl.DateTimeFormat("ja-JP", options);
+  const parts = dtf.formatToParts(t);
+  for (const part of parts) {
+    if (part.type === "hour") return parseInt(part.value);
+  }
+  return t.getHours();
+}
+
+/************************************************
  * NPC 杏奈の会話ロジック（さらに強化版）
  ************************************************/
 function getNpcResponses(userMsg: string): string[] {
   const msg = userMsg.toLowerCase();
 
-  // --- ① 感情スコア算出（キーワード＋句読点、文末記号、発言長） ---
+  // --- ① 感情スコア算出（キーワード＋句読点、疑問符、文末記号、発言長） ---
   let score = 0;
-  const posWords = ["うれしい", "楽しい", "最高", "幸せ", "ワクワク"];
+  const posWords = ["うれしい", "楽しい", "最高", "幸せ", "ワクワク", "ありがとう"];
   const negWords = ["悲しい", "辛い", "苦しい", "しんどい", "寂しい"];
   for (const w of posWords) {
     if (msg.includes(w)) score += 1;
@@ -63,13 +108,12 @@ function getNpcResponses(userMsg: string): string[] {
   for (const w of negWords) {
     if (msg.includes(w)) score -= 1;
   }
-  // 句読点による補正
+  // 句読点や記号による補正
   if (msg.includes("!")) score += 0.5;
   if (msg.includes("?") || msg.includes("？")) score += 0.3;
   if (msg.includes("...") || msg.includes("…")) score -= 0.5;
-  // 発言が長い場合は、多少内容があると判断
-  if (msg.length > 20) score += 0.2;
-  // キーワードが全く無い場合も、微小なランダムバイアスを追加
+  if (msg.includes("笑") || msg.includes("www")) score += 0.3;
+  if (userMsg.length > 20) score += 0.2;
   if (score === 0) {
     score = (Math.random() - 0.5) * 0.5;
   }
@@ -87,9 +131,16 @@ function getNpcResponses(userMsg: string): string[] {
   } else if (sentiment === "negative") {
     moods = ["serious", "thoughtful"];
   }
+  // 時刻に合わせた挨拶追加（例：朝・夜）
+  const hour = getJSTHour();
+  if (hour < 12) {
+    moods.push("morning");
+  } else if (hour >= 18) {
+    moods.push("evening");
+  }
   const mood = moods[Math.floor(Math.random() * moods.length)];
 
-  // 気分ごとの追加返答候補
+  // --- ③ 気分ごとの追加返答候補 ---
   const moodResponses: Record<string, string[]> = {
     "happy": [
       "今日は特に嬉しい気分だよ！",
@@ -116,24 +167,38 @@ function getNpcResponses(userMsg: string): string[] {
       "興奮しちゃう！今日のエネルギーがすごいよ！",
       "エキサイトしすぎて、止まらないかも！",
     ],
+    "morning": [
+      "おはよう！今日も良い一日をスタートしよう！",
+      "朝の光が眩しいね、元気出るよ～",
+    ],
+    "evening": [
+      "こんばんは、今日はお疲れ様！",
+      "夜の静けさに癒されるね～",
+    ],
   };
 
-  // --- ③ 感情に応じた追加返答 ---
+  // --- ④ 感情に応じた追加返答 ---
   const sentimentResponses: Record<"positive" | "negative", string[]> = {
     "positive": [
-      "あなたの明るさに私も元気をもらっちゃう！",
-      "そのポジティブさ、素敵だよ！",
-      "いい雰囲気だね、もっと笑って！",
+      "あなたの明るさに私も元気をもらうよ！",
+      "そのポジティブさ、最高だね！",
+      "いい雰囲気だよ、笑顔が素敵！",
     ],
     "negative": [
-      "大丈夫？無理しないでね、私がついてるよ。",
-      "辛いときはゆっくり休むのも大事だよ。",
+      "大丈夫？無理しないでね、私がそばにいるから。",
+      "辛い時は無理せず休んでね。",
       "あなたの気持ち、しっかり受け止めるからね。",
     ],
   };
 
-  // --- ④ キーワード応答辞書 ---
-  const keywords: Record<string, string[]> = {
+  // --- ⑤ 特殊キーワード追加応答 ---
+  const specialKeywords: Record<string, string[]> = {
+    "ありがとう": ["どういたしまして！", "こちらこそありがとう！"],
+    "おめでとう": ["おめでとう！本当に良かったね！", "お祝いするしかないね！"],
+  };
+
+  // --- ⑥ キーワード応答辞書 ---
+  const keywordsDict: Record<string, string[]> = {
     "hello": [
       "やっほー、元気？",
       "こんにちは♪ 会えてうれしいよ～",
@@ -143,7 +208,7 @@ function getNpcResponses(userMsg: string): string[] {
     "morning": [
       "おはよう！ちゃんと目覚めた？",
       "朝ごはんはしっかり食べた？",
-      "まだ眠そうだけど、今日も頑張ろう！",
+      "今日も一日頑張ろう！",
       "朝の空気って最高だよね～",
     ],
     "goodbye": [
@@ -165,7 +230,7 @@ function getNpcResponses(userMsg: string): string[] {
       "寝る前にお話しするのもいいよね",
     ],
     "love": [
-      "恋バナ！？それは盛り上がるね～",
+      "恋バナ！？ それは盛り上がるね～",
       "好きな人のこと、もっと聞かせてよ",
       "胸がキュンってする瞬間ってあるよね…",
       "恋って難しいけど素敵だよね",
@@ -244,21 +309,28 @@ function getNpcResponses(userMsg: string): string[] {
     ],
   };
 
-  // --- ⑤ 返答組み立て ---
+  // --- ⑦ 返答組み立て ---
   let responses: string[] = [];
-  const matchedKeys = Object.keys(keywords).filter((k) => msg.includes(k));
+
+  // まず、特殊キーワードがあればその応答を優先
+  for (const key in specialKeywords) {
+    if (msg.includes(key)) {
+      responses.push(...specialKeywords[key]);
+    }
+  }
+
+  const matchedKeys = Object.keys(keywordsDict).filter((k) => msg.includes(k));
   if (matchedKeys.length > 0) {
     const shuffled = matchedKeys.sort(() => 0.5 - Math.random());
     const pickCount = Math.min(shuffled.length, 2);
     for (let i = 0; i < pickCount; i++) {
       const key = shuffled[i];
-      const lines = keywords[key];
+      const lines = keywordsDict[key];
       const lineCount = 1 + Math.floor(Math.random() * 2);
       for (let j = 0; j < lineCount; j++) {
         responses.push(lines[Math.floor(Math.random() * lines.length)]);
       }
     }
-    // fallback を追加
     const fallbackLines = [
       "ふーん、そうなんだ？",
       "なかなか面白いね、もっと聞かせてよ。",
@@ -269,7 +341,6 @@ function getNpcResponses(userMsg: string): string[] {
     ];
     responses.push(fallbackLines[Math.floor(Math.random() * fallbackLines.length)]);
   } else {
-    // キーワードなしの場合：1～2行のfallback＋雑談
     const fallbackLines = [
       "ふーん、そうなんだ？",
       "なかなか面白いね、もっと聞かせてよ。",
@@ -287,7 +358,7 @@ function getNpcResponses(userMsg: string): string[] {
     }
   }
 
-  // --- ⑥ 気分・感情追加 ---
+  // --- ⑧ 気分・感情追加 ---
   if (Math.random() < 0.4 && moodResponses[mood]) {
     responses.push(moodResponses[mood][Math.floor(Math.random() * moodResponses[mood].length)]);
   }
@@ -306,7 +377,7 @@ function getNpcResponses(userMsg: string): string[] {
     responses.push(extraResponses[Math.floor(Math.random() * extraResponses.length)]);
   }
 
-  // --- ⑦ 追加フォローアップ（疑問や長文、笑いへの反応） ---
+  // --- ⑨ 追加フォローアップ（疑問、長文、笑いへの反応） ---
   let followUpResponses: string[] = [];
   if (msg.includes("?") || msg.includes("？")) {
     followUpResponses.push(
@@ -497,16 +568,6 @@ function escapeHtml(str: string): string {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
-}
-
-function timeStr(): string {
-  const t = new Date();
-  const mon = t.getMonth() + 1;
-  const mday = t.getDate();
-  const wday = ["日", "月", "火", "水", "木", "金", "土"][t.getDay()];
-  const hour = t.getHours().toString().padStart(2, "0");
-  const min = t.getMinutes().toString().padStart(2, "0");
-  return `${mon}/${mday}(${wday}) ${hour}:${min}`;
 }
 
 /************************************************
